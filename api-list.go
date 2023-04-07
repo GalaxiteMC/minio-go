@@ -20,6 +20,7 @@ package minio
 import (
 	"context"
 	"fmt"
+	"github.com/getsentry/sentry-go"
 	"net/http"
 	"net/url"
 	"time"
@@ -98,6 +99,11 @@ func (c *Client) listObjectsV2(ctx context.Context, bucketName string, opts List
 	// Initiate list objects goroutine here.
 	go func(objectStatCh chan<- ObjectInfo) {
 		defer close(objectStatCh)
+		span := sentry.StartSpan(ctx, "listObjectsV2")
+		if tx := sentry.TransactionFromContext(ctx); tx != nil {
+			defer span.Finish()
+			ctx = span.Context()
+		}
 		// Save continuationToken for next request.
 		var continuationToken string
 		for {
@@ -142,6 +148,7 @@ func (c *Client) listObjectsV2(ctx context.Context, bucketName string, opts List
 
 			// Listing ends result is not truncated, return right here.
 			if !result.IsTruncated {
+				span.Status = sentry.SpanStatusOK
 				return
 			}
 
@@ -169,12 +176,19 @@ func (c *Client) listObjectsV2(ctx context.Context, bucketName string, opts List
 // ?start-after - Sets a marker to start listing lexically at this key onwards.
 // ?max-keys - Sets the maximum number of keys returned in the response body.
 func (c *Client) listObjectsV2Query(ctx context.Context, bucketName, objectPrefix, continuationToken string, fetchOwner, metadata bool, delimiter string, startAfter string, maxkeys int, headers http.Header) (ListBucketV2Result, error) {
+	span := sentry.StartSpan(ctx, "listObjectsV2Query")
+	if tx := sentry.TransactionFromContext(ctx); tx != nil {
+		defer span.Finish()
+		ctx = span.Context()
+	}
 	// Validate bucket name.
 	if err := s3utils.CheckValidBucketName(bucketName); err != nil {
+		span.Status = sentry.SpanStatusInvalidArgument
 		return ListBucketV2Result{}, err
 	}
 	// Validate object prefix.
 	if err := s3utils.CheckValidObjectNamePrefix(objectPrefix); err != nil {
+		span.Status = sentry.SpanStatusInvalidArgument
 		return ListBucketV2Result{}, err
 	}
 	// Get resources properly escaped and lined up before
@@ -199,8 +213,11 @@ func (c *Client) listObjectsV2Query(ctx context.Context, bucketName, objectPrefi
 	// Set object prefix, prefix value to be set to empty is okay.
 	urlValues.Set("prefix", objectPrefix)
 
-	// Set delimiter, delimiter value to be set to empty is okay.
-	urlValues.Set("delimiter", delimiter)
+	// dont set empty delimiter for R2 compat
+	if delimiter != "" {
+		// Set delimiter, delimiter value to be set to empty is okay.
+		urlValues.Set("delimiter", delimiter)
+	}
 
 	// Set continuation token
 	if continuationToken != "" {
@@ -226,10 +243,12 @@ func (c *Client) listObjectsV2Query(ctx context.Context, bucketName, objectPrefi
 	})
 	defer closeResponse(resp)
 	if err != nil {
+		span.Status = sentry.SpanStatusUnknown
 		return ListBucketV2Result{}, err
 	}
 	if resp != nil {
 		if resp.StatusCode != http.StatusOK {
+			span.Status = sentry.SpanStatusUnknown
 			return ListBucketV2Result{}, httpRespToErrorResponse(resp, bucketName, "")
 		}
 	}
@@ -237,12 +256,14 @@ func (c *Client) listObjectsV2Query(ctx context.Context, bucketName, objectPrefi
 	// Decode listBuckets XML.
 	listBucketResult := ListBucketV2Result{}
 	if err = xmlDecoder(resp.Body, &listBucketResult); err != nil {
+		span.Status = sentry.SpanStatusInternalError
 		return listBucketResult, err
 	}
 
 	// This is an additional verification check to make
 	// sure proper responses are received.
 	if listBucketResult.IsTruncated && listBucketResult.NextContinuationToken == "" {
+		span.Status = sentry.SpanStatusUnimplemented
 		return listBucketResult, ErrorResponse{
 			Code:    "NotImplemented",
 			Message: "Truncated response should have continuation token set",
@@ -252,6 +273,7 @@ func (c *Client) listObjectsV2Query(ctx context.Context, bucketName, objectPrefi
 	for i, obj := range listBucketResult.Contents {
 		listBucketResult.Contents[i].Key, err = decodeS3Name(obj.Key, listBucketResult.EncodingType)
 		if err != nil {
+			span.Status = sentry.SpanStatusInternalError
 			return listBucketResult, err
 		}
 		listBucketResult.Contents[i].LastModified = listBucketResult.Contents[i].LastModified.Truncate(time.Millisecond)
@@ -260,6 +282,7 @@ func (c *Client) listObjectsV2Query(ctx context.Context, bucketName, objectPrefi
 	for i, obj := range listBucketResult.CommonPrefixes {
 		listBucketResult.CommonPrefixes[i].Prefix, err = decodeS3Name(obj.Prefix, listBucketResult.EncodingType)
 		if err != nil {
+			span.Status = sentry.SpanStatusInternalError
 			return listBucketResult, err
 		}
 	}

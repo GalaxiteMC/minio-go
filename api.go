@@ -23,6 +23,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"github.com/getsentry/sentry-go"
 	"hash/crc32"
 	"io"
 	"math/rand"
@@ -510,9 +511,16 @@ func (c *Client) do(req *http.Request) (resp *http.Response, err error) {
 			c.markOffline()
 		}
 	}()
+	ctx := req.Context()
+	span := sentry.StartSpan(ctx, "do")
+	if tx := sentry.TransactionFromContext(ctx); tx != nil {
+		defer span.Finish()
+		ctx = span.Context()
+	}
 
 	resp, err = c.httpClient.Do(req)
 	if err != nil {
+		span.Status = sentry.SpanStatusUnknown
 		// Handle this specifically for now until future Golang versions fix this issue properly.
 		if urlErr, ok := err.(*url.Error); ok {
 			if strings.Contains(urlErr.Err.Error(), "EOF") {
@@ -528,6 +536,7 @@ func (c *Client) do(req *http.Request) (resp *http.Response, err error) {
 
 	// Response cannot be non-nil, report error if thats the case.
 	if resp == nil {
+		span.Status = sentry.SpanStatusUnknown
 		msg := "Response is empty. " + reportIssue
 		return nil, errInvalidArgument(msg)
 	}
@@ -537,6 +546,7 @@ func (c *Client) do(req *http.Request) (resp *http.Response, err error) {
 	if c.isTraceEnabled && !(c.traceErrorsOnly && resp.StatusCode == http.StatusOK) {
 		err = c.dumpHTTP(req, resp)
 		if err != nil {
+			span.Status = sentry.SpanStatusUnknown
 			return nil, err
 		}
 	}
@@ -555,7 +565,13 @@ var successStatus = []int{
 // request upon any error up to maxRetries attempts in a binomially
 // delayed manner using a standard back off algorithm.
 func (c *Client) executeMethod(ctx context.Context, method string, metadata requestMetadata) (res *http.Response, err error) {
+	span := sentry.StartSpan(ctx, "executeMethod")
+	if tx := sentry.TransactionFromContext(ctx); tx != nil {
+		defer span.Finish()
+		ctx = span.Context()
+	}
 	if c.IsOffline() {
+		span.Status = sentry.SpanStatusFailedPrecondition
 		return nil, errors.New(c.endpointURL.String() + " is offline.")
 	}
 

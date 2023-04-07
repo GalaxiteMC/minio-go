@@ -21,6 +21,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/getsentry/sentry-go"
 	"io"
 	"net/http"
 	"sync"
@@ -60,6 +61,11 @@ func (c *Client) GetObject(ctx context.Context, bucketName, objectName string, o
 
 	// This routine feeds partial object data as and when the caller reads.
 	go func() {
+		span := sentry.StartSpan(ctx, "GetObject: "+objectName)
+		if tx := sentry.TransactionFromContext(ctx); tx != nil {
+			defer span.Finish()
+			ctx = span.Context()
+		}
 		defer close(resCh)
 		defer func() {
 			// Close the http response body before returning.
